@@ -7,6 +7,7 @@ import { notFound, errorHandler } from './middlewares/errorMiddleware.js';
 
 import userRoutes from './routes/userRoutes.js';
 import feedRoutes from './routes/feedRoutes.js';
+import courseRoutes from './routes/courseRoutes.js';
 
 // Load environment variables
 dotenv.config();
@@ -23,12 +24,18 @@ app.use(express.urlencoded({ extended: true }));
 // Cookie Parser Middleware
 app.use(cookieParser());
 
-// Enable CORS
-app.use(cors());
+// Enable CORS for the frontend and allow credentials for auth cookies
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+    credentials: true,
+  })
+);
 
 // Mount Routers
 app.use('/api/users', userRoutes);
 app.use('/api/feed', feedRoutes);
+app.use('/api/courses', courseRoutes);
 
 // Base route for testing
 app.get('/', (req, res) => {
@@ -39,8 +46,22 @@ app.get('/', (req, res) => {
 app.use(notFound);
 app.use(errorHandler);
 
-const PORT = process.env.PORT || 5000;
+const PORT = parseInt(process.env.PORT, 10) || 5000;
 
-app.listen(PORT, () => {
-  console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
-});
+const startServer = (port) => {
+  const server = app.listen(port, () => {
+    console.log(`Server running in ${process.env.NODE_ENV} mode on port ${port}`);
+  });
+
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      console.warn(`Port ${port} is already in use. Trying port ${port + 1}...`);
+      startServer(port + 1);
+    } else {
+      console.error('Server failed to start:', error);
+      process.exit(1);
+    }
+  });
+};
+
+startServer(PORT);

@@ -1,10 +1,14 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route, Link, Outlet } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Link, Outlet, Navigate } from 'react-router-dom';
 import { Leaderboard } from './components/social/Leaderboard';
 import { StudyFeed } from './components/social/StudyFeed';
 import { CourseViewer } from './components/course/CourseViewer';
 import { AchievementModal } from './components/ui/AchievementModal';
 import { useAuth } from './hooks/useAuth';
+import LoginPage from './pages/LoginPage';
+import RegisterPage from './pages/RegisterPage';
+import AdminDashboard from './components/AdminDashboard';
+import CourseSelector from './components/CourseSelector';
 
 const Layout = () => {
   const { user, level, logout } = useAuth();
@@ -26,6 +30,13 @@ const Layout = () => {
                 <span className="text-2xl">📚</span> Learn
               </Link>
             </li>
+            {user?.role === 'admin' && (
+              <li>
+                <Link to="/admin" className="flex items-center gap-3 hover:text-gray-900 dark:hover:text-white transition-colors">
+                  <span className="text-2xl">⚙️</span> Admin
+                </Link>
+              </li>
+            )}
           </ul>
         </div>
         
@@ -52,6 +63,20 @@ const Layout = () => {
   );
 };
 
+const RequireAuth = ({ children }) => {
+  const { user, isLoading } = useAuth();
+
+  if (isLoading) {
+    return <div className="min-h-screen flex items-center justify-center text-slate-900">Loading PrepWise...</div>;
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return children;
+};
+
 // Dummy lesson data mapping exactly what AI would yield
 const demoLessonData = [
   { id: 1, type: 'text', content: 'Welcome to React Architecture. Today we cover Props.' },
@@ -65,7 +90,11 @@ const App = () => {
   return (
     <Router>
       <Routes>
-        <Route path="/" element={<Layout />}>
+        <Route path="/" element={
+          <RequireAuth>
+            <Layout />
+          </RequireAuth>
+        }>
           {/* Dashboard Route (Leaderboard + Feed) */}
           <Route index element={
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -79,23 +108,15 @@ const App = () => {
           } />
 
           {/* Dedicated Learning Player Route */}
-          <Route path="learn" element={
-            <div className="flex justify-center w-full">
-               <CourseViewer 
-                 courseData={demoLessonData}
-                 onComplete={() => setModalOpen(true)}
-                 onExit={() => alert('Exit clicked! Routing back to dashboard.')}
-               />
-               <AchievementModal 
-                 isOpen={modalOpen}
-                 onClose={() => setModalOpen(false)}
-                 achievement={{ title: "Lesson Conquered", icon: "🧠" }}
-                 oldXP={150}
-                 newXP={160}
-               />
-            </div>
-          } />
+          <Route path="learn" element={<CourseSelector />} />
+
+          {/* Admin Dashboard Route */}
+          <Route path="admin" element={<AdminDashboard />} />
         </Route>
+
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/register" element={<RegisterPage />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     </Router>
   );

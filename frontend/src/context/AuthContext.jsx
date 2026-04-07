@@ -50,10 +50,15 @@ export const AuthProvider = ({ children }) => {
       const response = await fetch('/api/users/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(credentials),
       });
       const data = await response.json();
-      
+
+      if (!response.ok) {
+        return { success: false, message: data.message || 'Login rejected' };
+      }
+
       if (data.success) {
         setToken(data.token);
         setUser(data.data);
@@ -62,7 +67,34 @@ export const AuthProvider = ({ children }) => {
       }
       return { success: false, message: data.message || 'Login rejected' };
     } catch (error) {
-      return { success: false, message: 'Server connection directly failed' };
+      return { success: false, message: 'Unable to reach server' };
+    }
+  };
+
+  const register = async (credentials) => {
+    try {
+      const response = await fetch('/api/users/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(credentials),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        return { success: false, message: data.message || 'Registration failed' };
+      }
+
+      if (data.success) {
+        setToken(data.token);
+        setUser(data.data);
+        localStorage.setItem('prepwise_token', data.token);
+        return { success: true };
+      }
+
+      return { success: false, message: data.message || 'Registration failed' };
+    } catch (error) {
+      return { success: false, message: 'Unable to reach server' };
     }
   };
 
@@ -104,6 +136,7 @@ export const AuthProvider = ({ children }) => {
     isLoading,
     level, // Easy-access Gamification stat
     login,
+    register,
     logout,
     refreshStats,
   };

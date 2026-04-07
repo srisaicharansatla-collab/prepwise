@@ -1,5 +1,104 @@
 import mongoose from 'mongoose';
 import User from '../models/User.js';
+import Course from '../models/Course.js';
+import generateToken from '../utils/generateToken.js';
+
+// Register a new user and return auth token
+export const registerUser = async (req, res, next) => {
+  try {
+    const { username, email, password } = req.body;
+
+    // Enhanced validation
+    if (!username || !email || !password) {
+      res.status(400);
+      throw new Error('Username, email, and password are required');
+    }
+    if (username.length < 3 || username.length > 20 || !/^[a-zA-Z0-9_]+$/.test(username)) {
+      res.status(400);
+      throw new Error('Username must be 3-20 chars, alphanumeric + underscore');
+    }
+    if (password.length < 6) {
+      res.status(400);
+      throw new Error('Password must be at least 6 characters');
+    }
+    if (!/^\S+@\S+\.\S+$/.test(email)) {
+      res.status(400);
+      throw new Error('Please enter a valid email');
+    }
+
+    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
+    if (existingUser) {
+      res.status(400);
+      throw new Error('A user with that email or username already exists');
+    }
+
+    const user = await User.create({ username, email, password });
+
+    const token = generateToken(res, user._id);
+
+    res.status(201).json({
+      success: true,
+      data: {
+        _id: user._id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        totalXP: user.totalXP,
+        currentStreak: user.currentStreak,
+        badges: user.badges,
+      },
+      token,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Authenticate a user and return auth token
+export const loginUser = async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      res.status(400);
+      throw new Error('Email and password are required');
+    }
+    if (password.length < 6) {
+      res.status(400);
+      throw new Error('Password must be at least 6 characters');
+    }
+    if (!/^\S+@\S+\.\S+$/.test(email)) {
+      res.status(400);
+      throw new Error('Please enter a valid email');
+    }
+
+    const user = await User.findOne({ email }).select('+password');
+
+    if (!user || !(await user.matchPassword(password))) {
+      res.status(401);
+      throw new Error('Invalid email or password');
+    }
+
+    const token = generateToken(res, user._id);
+    user.password = undefined;
+
+    res.status(200).json({
+      success: true,
+      data: {
+        _id: user._id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        totalXP: user.totalXP,
+        currentStreak: user.currentStreak,
+        badges: user.badges,
+      },
+      token,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
 
 // Get logged in user profile
 export const getUserProfile = async (req, res, next) => {
@@ -19,8 +118,19 @@ export const updateProgress = async (req, res, next) => {
   session.startTransaction();
 
   try {
-    const { courseId, lessonId, xpEarned = 10 } = req.body;
+    const { courseId, lessonId, subtopicId, xpEarned = 10, isLessonCompletion = false, isSubtopicCompletion = false } = req.body;
     const userId = req.user._id;
+
+    // Input validation for ObjectIds and XP
+    if (!mongoose.Types.ObjectId.isValid(courseId)) {
+      throw new Error('Invalid courseId');
+    }
+    if (lessonId && !mongoose.Types.ObjectId.isValid(lessonId)) {
+      throw new Error('Invalid lessonId');
+    }
+    if (xpEarned < 0 || xpEarned > 100) {
+      throw new Error('XP earned must be between 0 and 100');
+    }
 
     // Fetch the user enforcing the pessimistic context of this transaction
     const user = await User.findById(userId).session(session);
@@ -31,39 +141,37 @@ export const updateProgress = async (req, res, next) => {
 
     let badgesUnlocked = [];
 
-    // 1. Calculate Streak Logic
-    const today = new Date();
-    today.setHours(0, 0, 0, 0); // Normalize to absolute midnight for exact day delta processing
+    // 1. Calculate Streak Logic - increment on lesson completion or subtopic completion
+    if (isLessonCompletion || isSubtopicCompletion) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0); // Normalize to absolute midnight for exact day delta processing
 
-    const lastActivity = user.lastActivityDate;
-    if (lastActivity) {
-      const last = new Date(lastActivity);
-      last.setHours(0, 0, 0, 0);
+      const lastActivity = user.lastActivityDate;
+      if (lastActivity) {
+        const last = new Date(lastActivity);
+        last.setHours(0, 0, 0, 0);
 
-      const diffInDays = (today - last) / (1000 * 60 * 60 * 24);
+        const diffInDays = (today - last) / (1000 * 60 * 60 * 24);
 
-      if (diffInDays === 1) {
-        user.currentStreak += 1;
-      } else if (diffInDays > 1) {
-        // Punish player if they missed a day (streak resets)
+        if (diffInDays === 1) {
+          user.currentStreak += 1;
+        } else if (diffInDays > 1) {
+          // Punish player if they missed a day (streak resets)
+          user.currentStreak = 1;
+        }
+        // If diffInDays === 0, they already submitted today, maintain streak without iterating.
+      } else {
         user.currentStreak = 1;
       }
-      // If diffInDays === 0, they already submitted today, maintain streak without iterating.
-    } else {
-      user.currentStreak = 1;
-    }
 
-    user.lastActivityDate = new Date();
+      user.lastActivityDate = new Date();
+    }
 
     // 2. Safely Assign Experience Points
     user.totalXP += xpEarned;
 
-    // 3. Prevent Re-granting completion for the exact same lesson
-    const alreadyCompleted = user.completedLessons.find(
-      (lesson) => lesson.lessonId.toString() === lessonId
-    );
-
-    if (!alreadyCompleted) {
+    // 3. Track completed lessons
+    if (lessonId && !user.completedLessons.find(lesson => lesson.lessonId.toString() === lessonId)) {
       user.completedLessons.push({
         courseId,
         lessonId,
@@ -71,18 +179,52 @@ export const updateProgress = async (req, res, next) => {
       });
     }
 
-    // 4. Dynamically Assess Gamification Engine (Threshold Badges)
+    // 4. Track completed subtopics
+    if (subtopicId && isSubtopicCompletion && !user.completedSubtopics.find(st => st.subtopicId === subtopicId && st.courseId.toString() === courseId)) {
+      user.completedSubtopics.push({
+        courseId,
+        subtopicId,
+        completedAt: new Date(),
+      });
+    }
+
+    // 5. Check for course completion and award badges
+    // For now, we'll check if all subtopics in a course are completed
+    // This is a simplified check - in a real app you'd have a course structure
+    const courseSubtopicsCompleted = user.completedSubtopics.filter(st => st.courseId.toString() === courseId);
+    if (courseSubtopicsCompleted.length >= 6) { // Assuming 6 subtopics per course
+      const courseCompletionBadge = user.badges.find(badge => badge.name === `${courseId} Master`);
+      if (!courseCompletionBadge) {
+        const badge = { name: `${courseId} Master`, icon: '🏆', earnedAt: new Date() };
+        user.badges.push(badge);
+        badgesUnlocked.push(badge);
+      }
+    }
+
+    // 6. Dynamically Assess Gamification Engine (Threshold Badges)
     const currentOwnedBadges = user.badges.map((b) => b.name);
 
     if (user.currentStreak >= 3 && !currentOwnedBadges.includes('On Fire!')) {
-      const badge = { name: 'On Fire!', icon: 'flame-3.png', earnedAt: new Date() };
+      const badge = { name: 'On Fire!', icon: '🔥', earnedAt: new Date() };
+      user.badges.push(badge);
+      badgesUnlocked.push(badge);
+    }
+
+    if (user.currentStreak >= 7 && !currentOwnedBadges.includes('Week Warrior')) {
+      const badge = { name: 'Week Warrior', icon: '📅', earnedAt: new Date() };
       user.badges.push(badge);
       badgesUnlocked.push(badge);
     }
 
     const firstStepsCondition = user.completedLessons.length >= 1;
     if (firstStepsCondition && !currentOwnedBadges.includes('First Steps')) {
-      const badge = { name: 'First Steps', icon: 'scholar-1.png', earnedAt: new Date() };
+      const badge = { name: 'First Steps', icon: '🎓', earnedAt: new Date() };
+      user.badges.push(badge);
+      badgesUnlocked.push(badge);
+    }
+
+    if (user.totalXP >= 100 && !currentOwnedBadges.includes('Century Club')) {
+      const badge = { name: 'Century Club', icon: '💯', earnedAt: new Date() };
       user.badges.push(badge);
       badgesUnlocked.push(badge);
     }
@@ -99,7 +241,6 @@ export const updateProgress = async (req, res, next) => {
         newTotalXP: user.totalXP,
         currentStreak: user.currentStreak,
         badgesUnlocked,           // Useful flag for front-end notification popups
-        isAlreadyCompleted: !!alreadyCompleted, // Inform FE if this was a re-run
       },
     });
   } catch (error) {
@@ -118,6 +259,54 @@ export const getLeaderboard = async (req, res, next) => {
       .select('username avatar totalXP currentStreak badges'); // Do not expose sensitive auth logic
     
     res.status(200).json({ success: true, data: topUsers });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Retrieve all users for admin dashboard
+export const getAllUsers = async (req, res, next) => {
+  try {
+    const users = await User.find()
+      .select('-password')
+      .sort({ totalXP: -1 });
+    
+    res.status(200).json({ success: true, data: users });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Promote user to admin (for development/testing)
+export const promoteToAdmin = async (req, res, next) => {
+  try {
+    if (req.user.role !== 'admin') {
+      res.status(403);
+      throw new Error('Admin role required');
+    }
+
+    const { userId } = req.body;
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      res.status(400);
+      throw new Error('Invalid userId');
+    }
+
+    if (userId === req.user._id.toString()) {
+      res.status(400);
+      throw new Error('Cannot promote self');
+    }
+
+    const user = await User.findById(userId);
+
+    if (!user) {
+      res.status(404);
+      throw new Error('User not found');
+    }
+
+    user.role = 'admin';
+    await user.save();
+
+    res.status(200).json({ success: true, message: 'User promoted to admin' });
   } catch (error) {
     next(error);
   }

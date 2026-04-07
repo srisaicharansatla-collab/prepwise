@@ -57,6 +57,13 @@ const userSchema = new mongoose.Schema(
         completedAt: { type: Date, default: Date.now },
       },
     ],
+    completedSubtopics: [
+      {
+        subtopicId: { type: String, required: true },
+        courseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Course', required: true },
+        completedAt: { type: Date, default: Date.now },
+      },
+    ],
   },
   {
     timestamps: true,
