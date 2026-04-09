@@ -121,6 +121,9 @@ export const AuthProvider = ({ children }) => {
           ...prev,
           totalXP: data.data.totalXP,
           currentStreak: data.data.currentStreak,
+          accuracyRate: data.data.accuracyRate,
+          totalAttempted: data.data.totalAttempted,
+          totalCorrect: data.data.totalCorrect,
           badges: data.data.badges,
         }));
       }

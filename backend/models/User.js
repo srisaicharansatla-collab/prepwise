@@ -43,6 +43,22 @@ const userSchema = new mongoose.Schema(
     lastActivityDate: {
       type: Date,
     },
+    totalAttempted: {
+      type: Number,
+      default: 0,
+      min: [0, 'Attempts cannot be negative'],
+    },
+    totalCorrect: {
+      type: Number,
+      default: 0,
+      min: [0, 'Correct count cannot be negative'],
+    },
+    accuracyRate: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 100,
+    },
     badges: [
       {
         name: { type: String, required: true },
@@ -62,6 +78,16 @@ const userSchema = new mongoose.Schema(
         subtopicId: { type: String, required: true },
         courseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Course', required: true },
         completedAt: { type: Date, default: Date.now },
+      },
+    ],
+    quizAttempts: [
+      {
+        quizId: { type: mongoose.Schema.Types.ObjectId, ref: 'Quiz', required: true },
+        courseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Course', required: true },
+        selectedAnswer: { type: String, required: true },
+        isCorrect: { type: Boolean, required: true },
+        xpEarned: { type: Number, default: 0 },
+        attemptedAt: { type: Date, default: Date.now },
       },
     ],
   },

@@ -45,6 +45,7 @@ export const registerUser = async (req, res, next) => {
         role: user.role,
         totalXP: user.totalXP,
         currentStreak: user.currentStreak,
+        accuracyRate: user.accuracyRate,
         badges: user.badges,
       },
       token,
@@ -91,6 +92,7 @@ export const loginUser = async (req, res, next) => {
         role: user.role,
         totalXP: user.totalXP,
         currentStreak: user.currentStreak,
+        accuracyRate: user.accuracyRate,
         badges: user.badges,
       },
       token,
@@ -110,142 +112,218 @@ export const getUserProfile = async (req, res, next) => {
   }
 };
 
-// Update Gamification Progress securely and atomically
+// ─── POST /progress ─────────────────────────────────────────────────────────
+// Update Gamification Progress (course/lesson/subtopic completion).
+// FIXED: Removed MongoDB transactions — they SILENTLY FAIL on standalone
+// local MongoDB (transactions require replica sets). Uses direct save() instead.
 export const updateProgress = async (req, res, next) => {
-  // Establish a MongoDB Transaction explicitly for Atomicity (prevents double-XP race conditions)
-  // Note: Transactions require MongoDB Replica Sets (e.g. Atlas clustering)
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
   try {
     const { courseId, lessonId, subtopicId, xpEarned = 10, isLessonCompletion = false, isSubtopicCompletion = false } = req.body;
     const userId = req.user._id;
 
-    // Input validation for ObjectIds and XP
+    // Input validation
     if (!mongoose.Types.ObjectId.isValid(courseId)) {
+      res.status(400);
       throw new Error('Invalid courseId');
     }
     if (lessonId && !mongoose.Types.ObjectId.isValid(lessonId)) {
+      res.status(400);
       throw new Error('Invalid lessonId');
     }
     if (xpEarned < 0 || xpEarned > 100) {
+      res.status(400);
       throw new Error('XP earned must be between 0 and 100');
     }
 
-    // Fetch the user enforcing the pessimistic context of this transaction
-    const user = await User.findById(userId).session(session);
-
+    // Find this specific user by _id
+    const user = await User.findById(userId);
     if (!user) {
+      res.status(404);
       throw new Error('User not found');
     }
 
     let badgesUnlocked = [];
 
-    // 1. Calculate Streak Logic - increment on lesson completion or subtopic completion
+    // 1. Streak Logic
     if (isLessonCompletion || isSubtopicCompletion) {
       const today = new Date();
-      today.setHours(0, 0, 0, 0); // Normalize to absolute midnight for exact day delta processing
+      today.setHours(0, 0, 0, 0);
 
-      const lastActivity = user.lastActivityDate;
-      if (lastActivity) {
-        const last = new Date(lastActivity);
+      if (user.lastActivityDate) {
+        const last = new Date(user.lastActivityDate);
         last.setHours(0, 0, 0, 0);
-
-        const diffInDays = (today - last) / (1000 * 60 * 60 * 24);
+        const diffInDays = Math.round((today - last) / (1000 * 60 * 60 * 24));
 
         if (diffInDays === 1) {
           user.currentStreak += 1;
         } else if (diffInDays > 1) {
-          // Punish player if they missed a day (streak resets)
           user.currentStreak = 1;
         }
-        // If diffInDays === 0, they already submitted today, maintain streak without iterating.
       } else {
         user.currentStreak = 1;
       }
-
       user.lastActivityDate = new Date();
     }
 
-    // 2. Safely Assign Experience Points
+    // 2. XP
     user.totalXP += xpEarned;
 
     // 3. Track completed lessons
-    if (lessonId && !user.completedLessons.find(lesson => lesson.lessonId.toString() === lessonId)) {
-      user.completedLessons.push({
-        courseId,
-        lessonId,
-        completedAt: new Date(),
-      });
+    if (lessonId && !user.completedLessons.find(l => l.lessonId.toString() === lessonId)) {
+      user.completedLessons.push({ courseId, lessonId, completedAt: new Date() });
     }
 
     // 4. Track completed subtopics
     if (subtopicId && isSubtopicCompletion && !user.completedSubtopics.find(st => st.subtopicId === subtopicId && st.courseId.toString() === courseId)) {
-      user.completedSubtopics.push({
-        courseId,
-        subtopicId,
-        completedAt: new Date(),
-      });
+      user.completedSubtopics.push({ courseId, subtopicId, completedAt: new Date() });
     }
 
-    // 5. Check for course completion and award badges
-    // For now, we'll check if all subtopics in a course are completed
-    // This is a simplified check - in a real app you'd have a course structure
+    // 5. Badge checks
     const courseSubtopicsCompleted = user.completedSubtopics.filter(st => st.courseId.toString() === courseId);
-    if (courseSubtopicsCompleted.length >= 6) { // Assuming 6 subtopics per course
-      const courseCompletionBadge = user.badges.find(badge => badge.name === `${courseId} Master`);
-      if (!courseCompletionBadge) {
+    if (courseSubtopicsCompleted.length >= 6) {
+      if (!user.badges.find(b => b.name === `${courseId} Master`)) {
         const badge = { name: `${courseId} Master`, icon: '🏆', earnedAt: new Date() };
         user.badges.push(badge);
         badgesUnlocked.push(badge);
       }
     }
 
-    // 6. Dynamically Assess Gamification Engine (Threshold Badges)
-    const currentOwnedBadges = user.badges.map((b) => b.name);
-
-    if (user.currentStreak >= 3 && !currentOwnedBadges.includes('On Fire!')) {
+    const owned = user.badges.map(b => b.name);
+    if (user.currentStreak >= 3 && !owned.includes('On Fire!')) {
       const badge = { name: 'On Fire!', icon: '🔥', earnedAt: new Date() };
-      user.badges.push(badge);
-      badgesUnlocked.push(badge);
+      user.badges.push(badge); badgesUnlocked.push(badge);
     }
-
-    if (user.currentStreak >= 7 && !currentOwnedBadges.includes('Week Warrior')) {
+    if (user.currentStreak >= 7 && !owned.includes('Week Warrior')) {
       const badge = { name: 'Week Warrior', icon: '📅', earnedAt: new Date() };
-      user.badges.push(badge);
-      badgesUnlocked.push(badge);
+      user.badges.push(badge); badgesUnlocked.push(badge);
     }
-
-    const firstStepsCondition = user.completedLessons.length >= 1;
-    if (firstStepsCondition && !currentOwnedBadges.includes('First Steps')) {
+    if (user.completedLessons.length >= 1 && !owned.includes('First Steps')) {
       const badge = { name: 'First Steps', icon: '🎓', earnedAt: new Date() };
-      user.badges.push(badge);
-      badgesUnlocked.push(badge);
+      user.badges.push(badge); badgesUnlocked.push(badge);
     }
-
-    if (user.totalXP >= 100 && !currentOwnedBadges.includes('Century Club')) {
+    if (user.totalXP >= 100 && !owned.includes('Century Club')) {
       const badge = { name: 'Century Club', icon: '💯', earnedAt: new Date() };
-      user.badges.push(badge);
-      badgesUnlocked.push(badge);
+      user.badges.push(badge); badgesUnlocked.push(badge);
     }
 
-    // Execute atomic save. Triggers potential rollbacks if simultaneous execution compromised consistency.
-    await user.save({ session });
-    await session.commitTransaction();
-    session.endSession();
+    // 6. Save (no transaction — works on standalone MongoDB)
+    await user.save();
 
+    console.log(
+      `[DB WRITE ✓] progress | user=${user.username} | ` +
+      `xp+=${xpEarned} | totalXP=${user.totalXP} | streak=${user.currentStreak}`
+    );
+
+    // Return the FULL updated user object so frontend doesn't have to guess
     res.status(200).json({
       success: true,
+      data: {
+        _id: user._id,
+        username: user.username,
+        totalXP: user.totalXP,
+        currentStreak: user.currentStreak,
+        lastActivityDate: user.lastActivityDate,
+        accuracyRate: user.accuracyRate,
+        totalAttempted: user.totalAttempted,
+        totalCorrect: user.totalCorrect,
+        badges: user.badges,
+        completedLessons: user.completedLessons,
+        completedSubtopics: user.completedSubtopics,
+      },
       gamificationUpdate: {
         xpGained: xpEarned,
         newTotalXP: user.totalXP,
         currentStreak: user.currentStreak,
-        badgesUnlocked,           // Useful flag for front-end notification popups
+        badgesUnlocked,
       },
     });
   } catch (error) {
-    await session.abortTransaction();
-    session.endSession();
+    next(error);
+  }
+};
+
+// ─── POST /update-progress ──────────────────────────────────────────────────
+// The "Data Bridge" endpoint for MCQ answers.
+// Receives { isCorrect }, updates XP (+5), streak, accuracy_rate.
+// Returns the FULL updated user object for atomic frontend state sync.
+export const updateQuizProgress = async (req, res, next) => {
+  try {
+    const { isCorrect } = req.body;
+    const userId = req.user._id;
+
+    // Validate the isCorrect boolean
+    if (typeof isCorrect !== 'boolean') {
+      res.status(400);
+      throw new Error('isCorrect (boolean) is required in the request body');
+    }
+
+    // Find this specific user by their _id
+    const user = await User.findById(userId);
+    if (!user) {
+      res.status(404);
+      throw new Error('User not found');
+    }
+
+    // 1. Increment total attempts
+    user.totalAttempted += 1;
+
+    // 2. If correct → +5 XP and increment correct counter
+    if (isCorrect) {
+      user.totalXP += 5;
+      user.totalCorrect += 1;
+    }
+
+    // 3. Streak logic: check if lastActivityDate was yesterday
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    if (user.lastActivityDate) {
+      const last = new Date(user.lastActivityDate);
+      last.setHours(0, 0, 0, 0);
+      const diffDays = Math.round((today - last) / (1000 * 60 * 60 * 24));
+
+      if (diffDays === 1) {
+        user.currentStreak += 1;  // yesterday → continue streak
+      } else if (diffDays > 1) {
+        user.currentStreak = 1;   // missed days → reset
+      }
+      // diffDays === 0 → same day, keep streak as-is
+    } else {
+      user.currentStreak = 1;     // first ever activity
+    }
+    user.lastActivityDate = new Date();
+
+    // 4. Recalculate accuracy_rate = (correct / total) * 100
+    user.accuracyRate = parseFloat(
+      ((user.totalCorrect / user.totalAttempted) * 100).toFixed(2)
+    );
+
+    // 5. Save to database
+    await user.save();
+
+    // 6. Log successful DB write
+    console.log(
+      `[DB WRITE ✓] update-progress | user=${user.username} | ` +
+      `correct=${isCorrect} | totalXP=${user.totalXP} | ` +
+      `streak=${user.currentStreak} | accuracy=${user.accuracyRate}%`
+    );
+
+    // Return the FULL updated user object — frontend "Success Hook" depends on this
+    res.status(200).json({
+      success: true,
+      data: {
+        _id: user._id,
+        username: user.username,
+        totalXP: user.totalXP,
+        currentStreak: user.currentStreak,
+        lastActivityDate: user.lastActivityDate,
+        accuracyRate: user.accuracyRate,
+        totalAttempted: user.totalAttempted,
+        totalCorrect: user.totalCorrect,
+        badges: user.badges,
+      },
+    });
+  } catch (error) {
     next(error);
   }
 };
@@ -277,8 +355,124 @@ export const getAllUsers = async (req, res, next) => {
   }
 };
 
+// ─── POST /updateUserStats (TEST DB) ─────────────────────────────────────
+// Robust endpoint specifically for test database.
+// Uses MONGO_TEST_URI (separate from main DB).
+// Exact same logic as updateQuizProgress + transaction-like read/modify/write.
+// Explicit try/catch + returns UPDATED row for frontend confirmation.
+export const updateUserStatsTestDB = async (req, res) => {
+  let testConn = null;
+  
+  try {
+    const { isCorrect } = req.body;
+    const userId = req.user._id;
+
+    console.log(`[TEST-DB] updateUserStats | userId=${userId} | isCorrect=${isCorrect}`);
+
+    // Validate input
+    if (typeof isCorrect !== 'boolean') {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'isCorrect (boolean) is required' 
+      });
+    }
+
+    // Create SEPARATE test DB connection
+    const testUri = process.env.MONGO_TEST_URI || process.env.MONGO_URI_TEST;
+    if (!testUri) {
+      return res.status(500).json({ 
+        success: false, 
+        error: 'MONGO_TEST_URI not configured in .env' 
+      });
+    }
+
+    testConn = mongoose.createConnection(testUri);
+    
+    // Get User model for test DB
+    const TestUser = testConn.model('User', require('../models/User').schema);
+
+    // Read user BEFORE update
+    const user = await TestUser.findById(userId);
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'User not found in test DB' 
+      });
+    }
+
+    console.log(`[TEST-DB READ ✓] Before: XP=${user.totalXP}, streak=${user.currentStreak}, accuracy=${user.accuracyRate}%`);
+
+    // 1. totalAttempted++
+    user.totalAttempted += 1;
+
+    // 2. If correct: +5 XP, totalCorrect++
+    if (isCorrect) {
+      user.totalXP += 5;
+      user.totalCorrect += 1;
+    }
+
+    // 3. Streak logic (same as main DB)
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    if (user.lastActivityDate) {
+      const last = new Date(user.lastActivityDate);
+      last.setHours(0, 0, 0, 0);
+      const diffDays = Math.round((today - last) / (1000 * 60 * 60 * 24));
+
+      if (diffDays === 1) {
+        user.currentStreak += 1;
+      } else if (diffDays > 1) {
+        user.currentStreak = 1;
+      }
+    } else {
+      user.currentStreak = 1;
+    }
+    user.lastActivityDate = new Date();
+
+    // 4. accuracyRate = (totalCorrect / totalAttempted) * 100
+    user.accuracyRate = parseFloat(
+      ((user.totalCorrect / user.totalAttempted) * 100).toFixed(2)
+    );
+
+    // 5. Save & return UPDATED row
+    await user.save();
+
+    console.log(`[TEST-DB WRITE ✓] After: XP=${user.totalXP}, streak=${user.currentStreak}, accuracy=${user.accuracyRate}%`);
+
+    res.status(200).json({
+      success: true,
+      message: 'Test DB updated successfully',
+      updatedRow: {
+        _id: user._id,
+        username: user.username,
+        totalXP: user.totalXP,
+        currentStreak: user.currentStreak,
+        accuracyRate: user.accuracyRate,
+        totalAttempted: user.totalAttempted,
+        totalCorrect: user.totalCorrect,
+        lastActivityDate: user.lastActivityDate,
+        badges: user.badges,
+      }
+    });
+
+  } catch (error) {
+    console.error('[TEST-DB ERROR]', error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  } finally {
+    // Cleanup connection
+    if (testConn) {
+      await testConn.close();
+    }
+  }
+};
+
 // Promote user to admin (for development/testing)
 export const promoteToAdmin = async (req, res, next) => {
+
   try {
     if (req.user.role !== 'admin') {
       res.status(403);

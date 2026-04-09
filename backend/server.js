@@ -8,6 +8,9 @@ import { notFound, errorHandler } from './middlewares/errorMiddleware.js';
 import userRoutes from './routes/userRoutes.js';
 import feedRoutes from './routes/feedRoutes.js';
 import courseRoutes from './routes/courseRoutes.js';
+import quizRoutes from './routes/quizRoutes.js';
+import diagnosticRoutes from './routes/diagnosticRoutes.js';
+import statsRoutes from './routes/statsRoutes.js';
 
 // Load environment variables
 dotenv.config();
@@ -36,6 +39,9 @@ app.use(
 app.use('/api/users', userRoutes);
 app.use('/api/feed', feedRoutes);
 app.use('/api/courses', courseRoutes);
+app.use('/api/quizzes', quizRoutes);
+app.use('/api/diagnostic', diagnosticRoutes);
+app.use('/api/v1', statsRoutes);
 
 // Base route for testing
 app.get('/', (req, res) => {

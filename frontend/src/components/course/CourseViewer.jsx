@@ -7,99 +7,117 @@ import { CodeSnippet } from './CodeSnippet';
 import { MultipleChoiceQuiz } from './MultipleChoiceQuiz';
 import { useAuth } from '../../hooks/useAuth';
 
+// Helper: is a string a valid MongoDB ObjectId?
+const isObjectId = (str) => typeof str === 'string' && /^[0-9a-fA-F]{24}$/.test(str);
+
 /**
- * Main Controller orchestrating the AI-generated JSON Array into a seamless "Course Player"
+ * CourseViewer — orchestrates the slide-by-slide learning flow.
+ *
+ * Quiz XP flow (no double-award):
+ *   • If the quiz was server-validated → XP awarded inside validateQuizAnswer on backend;
+ *     we only call refreshStats() to sync the UI.
+ *   • If the quiz was locally validated (static fallback) → we POST to /api/users/progress
+ *     to award XP, then refreshStats().
  */
 export const CourseViewer = ({ courseData, courseId, subtopicId, onComplete, onExit }) => {
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentIndex, setCurrentIndex]     = useState(0);
   const [isCurrentValid, setIsCurrentValid] = useState(false);
   const [updatingProgress, setUpdatingProgress] = useState(false);
-  const [showAnimation, setShowAnimation] = useState(false);
-  const [animationType, setAnimationType] = useState(''); // 'correct' or 'wrong'
-  const [xpEarned, setXpEarned] = useState(0);
-  const { refreshStats } = useAuth();
+  const [quizResult, setQuizResult]         = useState(null);
+  const { token, refreshStats }             = useAuth();
 
-  // Safety fallback if AI fails to stream valid block formats
   if (!courseData || courseData.length === 0) {
-    return <div className="text-center p-8 font-bold animate-pulse text-gray-500">Generating AI Content...</div>;
+    return (
+      <div className="text-center p-8 font-bold animate-pulse text-gray-500">
+        Generating content…
+      </div>
+    );
   }
 
-  const currentItem = courseData[currentIndex];
-  // Calculate Progress percentage based on the current slide index in the subtopic
+  const currentItem       = courseData[currentIndex];
   const progressPercentage = ((currentIndex + 1) / courseData.length) * 100;
 
-  // Signal received from child components (e.g. they clicked Correct quiz option)
-  const handleValidation = (isValid) => {
-    setIsCurrentValid(isValid);
-  };
+  const handleValidation = (isValid) => setIsCurrentValid(isValid);
 
-  // Handle quiz answer with animation
-  const handleQuizAnswer = async (isCorrect) => {
-    const earnedXP = isCorrect ? 5 : 0;
-    setXpEarned(earnedXP);
-    setAnimationType(isCorrect ? 'correct' : 'wrong');
-    setShowAnimation(true);
+  /**
+   * Called by MultipleChoiceQuiz after an answer is submitted.
+   * @param {boolean} isCorrect
+   * @param {string}  explanation
+   * @param {number}  xpEarned       — 0 or 5 (already awarded if wasServerValidated)
+   * @param {boolean} wasServerValidated — true when /api/quizzes/answer handled the XP
+   */
+  const handleQuizAnswer = async (isCorrect, explanation, xpEarned = 0, wasServerValidated = false) => {
+    // Strictly gate XP: only show/award if the answer was actually correct
+    const confirmedXP = isCorrect === true ? xpEarned : 0;
 
-    if (isCorrect) {
-      setUpdatingProgress(true);
-      try {
-        const response = await fetch('/api/users/progress', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({
-            courseId,
-            lessonId: currentItem.id,
-            xpEarned: earnedXP
-          }),
-        });
-        const data = await response.json();
-        if (data.success) {
-          await refreshStats();
-        }
-      } catch (error) {
-        console.error('Failed to update progress:', error);
-      } finally {
-        setUpdatingProgress(false);
-      }
+    setQuizResult({
+      isCorrect: isCorrect === true,  // strict boolean — never null/undefined
+      explanation,
+      xpEarned: confirmedXP,
+    });
+
+    if (wasServerValidated) {
+      // XP already in DB — just refresh the UI counters
+      await refreshStats();
+      return;
     }
 
-    // Hide animation after 2 seconds and move to next item
-    setTimeout(() => {
-      setShowAnimation(false);
-      setAnimationType('');
-      setXpEarned(0);
-      handleNext();
-    }, 2000);
+    // Static / fallback quiz — award XP via /api/users/progress ONLY if correct
+    if (!isObjectId(courseId) || confirmedXP === 0) return;
+
+    setUpdatingProgress(true);
+    try {
+      const response = await fetch('/api/users/progress', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          courseId,
+          lessonId: currentItem.lessonId ?? null,
+          xpEarned: confirmedXP,
+        }),
+      });
+      const data = await response.json();
+      if (data.success) await refreshStats();
+    } catch (error) {
+      console.error('Failed to update progress:', error);
+    } finally {
+      setUpdatingProgress(false);
+    }
   };
 
   const handleNext = async () => {
     if (currentIndex < courseData.length - 1) {
       setCurrentIndex(prev => prev + 1);
-      // Immediately lock the "Next" button again on new views until the new segment re-validates itself
       setIsCurrentValid(false);
+      setQuizResult(null);
     } else {
-      // End of subtopic sequence triggered! Award completion XP
+      // End of subtopic — award completion bonus (25 XP) if courseId is a valid ObjectId
       setUpdatingProgress(true);
       try {
-        const response = await fetch('/api/users/progress', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({
-            courseId,
-            subtopicId,
-            xpEarned: 25, // Bonus XP for completing subtopic
-            isSubtopicCompletion: true
-          }),
-        });
-        const data = await response.json();
-
-        if (data.success) {
+        if (isObjectId(courseId)) {
+          const response = await fetch('/api/users/progress', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              courseId,
+              subtopicId,
+              xpEarned: 25,
+              isSubtopicCompletion: true,
+            }),
+          });
+          const data = await response.json();
+          if (data.success) await refreshStats();
+        } else {
           await refreshStats();
         }
       } catch (error) {
-        console.error('Failed to update subtopic progress:', error);
+        console.error('Failed to record subtopic completion:', error);
       } finally {
         setUpdatingProgress(false);
         onComplete();
@@ -107,7 +125,6 @@ export const CourseViewer = ({ courseData, courseId, subtopicId, onComplete, onE
     }
   };
 
-  // Node Renderer Factory - strictly maps 'type' strings from Database to correct UI Components
   const renderContent = () => {
     switch (currentItem.type) {
       case 'text':
@@ -115,24 +132,37 @@ export const CourseViewer = ({ courseData, courseId, subtopicId, onComplete, onE
       case 'code':
         return <CodeSnippet key={currentItem.id} data={currentItem} onValidate={handleValidation} />;
       case 'quiz':
-        return <MultipleChoiceQuiz key={currentItem.id} data={currentItem} onValidate={handleValidation} onAnswer={handleQuizAnswer} />;
+        return (
+          <MultipleChoiceQuiz
+            key={currentItem.id}
+            data={currentItem}
+            onValidate={handleValidation}
+            onAnswer={handleQuizAnswer}
+            token={token}
+            courseId={courseId}
+          />
+        );
       default:
-        return <div className="p-4 bg-red-100 text-red-600 rounded">Error: Unknown AI content type rendered.</div>;
+        return (
+          <div className="p-4 bg-red-100 text-red-600 rounded">
+            Unknown content type: {currentItem.type}
+          </div>
+        );
     }
   };
 
   return (
     <div className="max-w-3xl mx-auto w-full flex flex-col h-screen max-h-[85vh] bg-white dark:bg-brand-bg relative overflow-hidden shadow-2xl sm:rounded-3xl sm:border border-gray-100 dark:border-gray-800">
 
-      {/* Top Navigation HUD: Quit Button + Progress Meter */}
+      {/* Top HUD */}
       <div className="w-full pt-6 pb-4 px-6 flex flex-col gap-4">
         <div className="flex items-center gap-6">
           <button
             onClick={onExit}
             className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors font-extrabold text-2xl h-10 w-10 flex items-center justify-center rounded-full hover:bg-gray-100 dark:hover:bg-gray-800"
-            aria-label="Exit Lesson"
+            aria-label="Exit lesson"
           >
-            X
+            ✕
           </button>
           <div className="flex-1">
             <ProgressBar progress={progressPercentage} />
@@ -140,62 +170,64 @@ export const CourseViewer = ({ courseData, courseId, subtopicId, onComplete, onE
         </div>
         <div className="flex items-center justify-between text-sm text-gray-500">
           <span>Slide {currentIndex + 1} of {courseData.length}</span>
-          <span>Subtopic {subtopicId || ''}</span>
+          <span className="font-bold text-brand-light">
+            {currentItem.type === 'quiz' ? '📝 Quiz' : '📖 Lesson'}
+          </span>
         </div>
       </div>
 
-      {/* Primary Scrollable Educational Window */}
-      <div className="flex-1 overflow-y-auto w-full px-6 py-6 pb-24 scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-gray-700">
+      {/* Scrollable content */}
+      <div className="flex-1 overflow-y-auto w-full px-6 py-6 pb-28 scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-gray-700">
         <div className="max-w-2xl mx-auto w-full">
-           {renderContent()}
+          {renderContent()}
         </div>
       </div>
 
-      {/* Animation Overlay */}
-      {showAnimation && (
-        <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className={`text-center p-8 rounded-2xl shadow-2xl transform transition-all duration-500 ${
-            animationType === 'correct'
-              ? 'bg-green-500 text-white animate-bounce'
-              : 'bg-red-500 text-white animate-pulse'
-          }`}>
-            <div className="text-6xl mb-4">
-              {animationType === 'correct' ? '🎉' : '😞'}
-            </div>
-            <h3 className="text-2xl font-bold mb-2">
-              {animationType === 'correct' ? 'Correct!' : 'Incorrect!'}
-            </h3>
-            <p className="text-lg">
-              {animationType === 'correct'
-                ? `Great job! +${xpEarned} XP earned!`
-                : 'Keep trying! No XP earned this time.'
-              }
-            </p>
+      {/* Quiz result banner */}
+      {quizResult && (
+        <div className={`mx-6 mb-2 p-4 rounded-2xl border-2 ${
+          quizResult.isCorrect === true
+            ? 'bg-green-50 dark:bg-green-900/20 border-green-300 dark:border-green-700'
+            : 'bg-red-50 dark:bg-red-900/20 border-red-300 dark:border-red-700'
+        }`}>
+          <div className="flex items-center gap-3">
+            <span className="text-2xl">{quizResult.isCorrect === true ? '🎉' : '😞'}</span>
+            <span className={`font-bold text-lg ${
+              quizResult.isCorrect === true ? 'text-green-700 dark:text-green-300' : 'text-red-700 dark:text-red-300'
+            }`}>
+              {quizResult.isCorrect === true ? 'Correct! Well done.' : 'Incorrect. Try reviewing the slides again.'}
+            </span>
+            <span className={`ml-auto font-black text-xl ${
+              quizResult.isCorrect === true ? 'text-green-600 dark:text-green-400' : 'text-gray-400'
+            }`}>
+              {quizResult.isCorrect === true ? `+${quizResult.xpEarned} XP` : '+0 XP'}
+            </span>
           </div>
         </div>
       )}
 
-      {/* Floating Check/Continue Action Bar glued safely to the bottom edge */}
+      {/* Floating action bar */}
       <div className="absolute bottom-0 w-full border-t-2 border-gray-100 dark:border-gray-800 bg-white dark:bg-brand-bg px-6 py-5">
         <div className="max-w-3xl mx-auto flex justify-between items-center w-full">
-          {/* Subtle location tracker */}
           <div className="hidden sm:block text-sm font-bold text-gray-400 tracking-widest uppercase">
-            Segment {currentIndex + 1} / {courseData.length}
+            {currentIndex + 1} / {courseData.length}
           </div>
-
           <div className="sm:w-auto w-full flex justify-end">
-             <GamifiedButton
-               variant={isCurrentValid ? 'primary' : 'secondary'}
-               disabled={!isCurrentValid || showAnimation}
-               onClick={handleNext}
-               fullWidth={window.innerWidth < 640}
-             >
-               {currentIndex === courseData.length - 1 ? 'Complete Subtopic' : 'Continue'}
-             </GamifiedButton>
+            <GamifiedButton
+              variant={isCurrentValid ? 'primary' : 'secondary'}
+              disabled={!isCurrentValid || updatingProgress}
+              onClick={handleNext}
+              fullWidth={window.innerWidth < 640}
+            >
+              {updatingProgress
+                ? 'Saving…'
+                : currentIndex === courseData.length - 1
+                ? '🏁 Complete Subtopic'
+                : 'Continue →'}
+            </GamifiedButton>
           </div>
         </div>
       </div>
-
     </div>
   );
 };
@@ -203,10 +235,14 @@ export const CourseViewer = ({ courseData, courseId, subtopicId, onComplete, onE
 CourseViewer.propTypes = {
   courseData: PropTypes.arrayOf(
     PropTypes.shape({
-      id: PropTypes.oneOfType([PropTypes.string, PropTypes.number]).isRequired,
-      type: PropTypes.oneOf(['text', 'code', 'quiz']).isRequired,
+      id:       PropTypes.oneOfType([PropTypes.string, PropTypes.number]).isRequired,
+      type:     PropTypes.oneOf(['text', 'code', 'quiz']).isRequired,
+      lessonId: PropTypes.string, // MongoDB Lesson _id for progress tracking
+      quizId:   PropTypes.string, // MongoDB Quiz _id for server-side validation
     })
   ).isRequired,
+  courseId:   PropTypes.string,
+  subtopicId: PropTypes.string,
   onComplete: PropTypes.func.isRequired,
-  onExit: PropTypes.func,
+  onExit:     PropTypes.func,
 };
